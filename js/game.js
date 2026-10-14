@@ -5,6 +5,7 @@ G.time = 0;
 G.shake = 0;
 G.cam = { x: 0, y: 0 };
 G.mw = { x: 0, y: 0 };
+G.net = null; // multijugador (net.js)
 
 G.resetProgress = () => {
   G.up = {};
@@ -12,7 +13,6 @@ G.resetProgress = () => {
   G.essence = 0;
   G.stats = { kills: 0, raised: 0 };
   G.seen = { book: false, q: false, f: false, v: false, intro: false, victory: false };
-  G.frenzy = 0;
   G.zoneAllies = [];
   G.zone = -1;
   G.maxZone = 0;
@@ -20,11 +20,16 @@ G.resetProgress = () => {
 };
 G.resetProgress();
 
+G.isGuest = () => !!(G.net && G.net.role === 'guest');
+G.isHost = () => !!(G.net && G.net.role === 'host');
+
 G.save = () => {
+  if (G.isGuest()) return; // la partida es del anfitrión
   try {
+    const mine = G.zoneAllies.filter(a => G.player && a[1] === G.player.id).map(a => a[0]);
     localStorage.setItem(SAVE_KEY, JSON.stringify({
-      v: 2, maxZone: G.maxZone, cleared: G.cleared, up: G.up, essence: G.essence,
-      stats: G.stats, seen: G.seen, allies: G.zoneAllies,
+      v: 3, maxZone: G.maxZone, cleared: G.cleared, up: G.up, essence: G.essence,
+      stats: G.stats, seen: G.seen, allies: mine,
     }));
   } catch (e) { /* sin almacenamiento: se juega igual */ }
 };
@@ -45,6 +50,8 @@ G.clearSave = () => {
 
 G.startGame = cont => {
   G.resetProgress();
+  G.player = null;
+  G.players = [];
   const s = cont ? G.loadSave() : null;
   if (s) {
     Object.assign(G.up, s.up);
@@ -58,7 +65,7 @@ G.startGame = cont => {
     // zonas que antes eran finales ahora tienen continuación
     for (const z of G.cleared) if (z < G.ZONES.length - 1) G.maxZone = Math.max(G.maxZone, z + 1);
     G.maxZone = G.U.clamp(G.maxZone | 0, 0, G.ZONES.length - 1);
-    G.loadLobby((s.allies || []).filter(t => G.ENEMIES[t] && G.ENEMIES[t].look));
+    G.loadLobby((s.allies || []).filter(t => typeof t === 'string' && G.ENEMIES[t] && G.ENEMIES[t].look));
   } else {
     G.clearSave();
     G.loadLobby([]);
@@ -73,14 +80,14 @@ G.retryZone = () => {
   G.state = 'play';
 };
 
-G.fleeToLobby = (types = G.zoneAllies) => {
-  G.loadLobby(types);
+G.fleeToLobby = (list = G.zoneAllies) => {
+  G.loadLobby(list);
   G.state = 'play';
 };
 
 // Empuja unidades superpuestas entre sí (más pesadas se mueven menos)
 function separate() {
-  const all = [G.player, ...G.allies, ...G.enemies].filter(u => !u.dead);
+  const all = [...G.players, ...G.allies, ...G.enemies].filter(u => !u.dead);
   for (let i = 0; i < all.length; i++) {
     for (let j = i + 1; j < all.length; j++) {
       const a = all[i], b = all[j];
@@ -89,7 +96,7 @@ function separate() {
       const d2 = dx * dx + dy * dy;
       if (d2 >= min * min || d2 === 0) continue;
       const d = Math.sqrt(d2), ov = min - d;
-      const heavy = u => u.boss || u.dummy;
+      const heavy = u => u.boss || u.dummy || u.remote;
       const wa = heavy(a) ? 1e4 : a.r * a.r, wb = heavy(b) ? 1e4 : b.r * b.r;
       const ka = wb / (wa + wb), kb = wa / (wa + wb);
       const nx = dx / d, ny = dy / d;
@@ -103,36 +110,61 @@ function separate() {
   }
 }
 
-function commandAllies() {
-  const e = G.nearest(G.mw, G.enemiesAlive(), 50);
+G.commandAllies = (p = G.player) => {
+  const e = G.nearest(p.inp.mw, G.enemiesAlive(), 50);
   if (e) {
-    G.focus = e;
+    p.focus = e;
     e.alert && e.alert();
-    G.banner('Siervos: ¡atacad!', 1);
+    G.book.tell(p, 'Siervos: ¡atacad!', 1);
   } else {
-    G.focus = null;
-    G.banner('Siervos: seguidme', 1);
+    p.focus = null;
+    G.book.tell(p, 'Siervos: seguidme', 1);
   }
-}
+};
 
-function updatePlay(dt) {
+// Teclas que solo afectan a la interfaz local
+function handleLocalKeys() {
   if (G.wasPressed('escape')) { G.state = 'paused'; return; }
   if (G.wasPressed('b') || G.wasPressed('tab')) {
     G.state = 'book';
     G.seen.book = true;
     return;
   }
-  if (G.wasPressed('r')) commandAllies();
-  if (G.DEBUG) {
+  if (G.DEBUG && !G.isGuest()) {
     if (G.wasPressed('f8')) G.essence += 200;
     if (G.wasPressed('f9')) {
-      if (G.world.lobby) G.loadZone(G.maxZone, G.currentAllyTypes());
+      if (G.world.lobby) G.loadZone(G.maxZone, G.currentAllies());
       else if (G.zone < G.ZONES.length - 1) G.nextZone();
     }
   }
+}
 
-  G.player.update(dt);
-  if (G.state !== 'play') return; // abrió diálogo o libro
+// Controles del jugador local -> su objeto de entrada
+function gatherLocalInput(active) {
+  const I = G.player.inp;
+  I.keys = active ? G.keys : {};
+  I.mw = { x: G.mw.x, y: G.mw.y };
+  I.down = active && G.mouse.down;
+  if (active) for (const k of ['e', 'q', 'f', 'v', 'r']) if (G.wasPressed(k)) I.ev.push(k);
+}
+
+// Simulación del mundo (un jugador o anfitrión)
+function simulate(dt) {
+  for (const p of G.players) {
+    if (!p.dead) { p.update(dt); continue; }
+    // compañero caído: reaparece junto a otro jugador vivo
+    if (p.respawn > 0) {
+      p.respawn -= dt;
+      const buddy = G.alivePlayers()[0];
+      if (p.respawn <= 0 && buddy) {
+        p.dead = false;
+        p.hp = Math.round(p.maxHp * 0.5);
+        p.x = buddy.x + 20; p.y = buddy.y;
+        p.tp++;
+        G.fx.burst(p.x, p.y, '#b57cff', 20, 140, 0.6);
+      }
+    }
+  }
   for (const a of G.allies) if (!a.dead) a.update(dt);
   for (const e of G.enemies) if (!e.dead) e.update(dt);
   separate();
@@ -140,16 +172,15 @@ function updatePlay(dt) {
   for (const o of G.orbs) o.update(dt);
   for (const c of G.corpses) c.timer -= dt;
   G.updateHazards(dt);
-  G.frenzy = Math.max(0, G.frenzy - dt);
 
   G.allies = G.allies.filter(a => !a.dead);
   G.enemies = G.enemies.filter(e => !e.dead);
   G.projs = G.projs.filter(p => !p.dead);
   G.orbs = G.orbs.filter(o => !o.dead);
   G.corpses = G.corpses.filter(c => c.timer > 0);
-  if (G.focus && G.focus.dead) G.focus = null;
+  for (const p of G.players) if (p.focus && p.focus.dead) p.focus = null;
 
-  if (G.state !== 'play') return; // murió este frame
+  if (G.state === 'dead') return; // cayeron todos este frame
 
   if (G.victoryTimer > 0) {
     G.victoryTimer -= dt;
@@ -165,6 +196,7 @@ function updatePlay(dt) {
 
 function updateCamera() {
   const p = G.player, wd = G.world;
+  if (!p || !wd) return;
   G.cam.x = wd.w <= G.W ? (wd.w - G.W) / 2 : G.U.clamp(p.x - G.W / 2, 0, wd.w - G.W);
   G.cam.y = wd.h <= G.H ? (wd.h - G.H) / 2 : G.U.clamp(p.y - G.H / 2, 0, wd.h - G.H);
   G.mw.x = G.mouse.x + G.cam.x;
@@ -185,7 +217,7 @@ function drawScene(ctx) {
   for (const o of G.orbs) o.draw(ctx);
   G.ui.drawWorldOverlay(ctx);
   if (G.world.lobby) G.drawMentor(ctx);
-  const units = [G.player, ...G.allies, ...G.enemies].filter(u => !u.dead).sort((a, b) => a.y - b.y);
+  const units = [...G.players, ...G.allies, ...G.enemies].filter(u => !u.dead).sort((a, b) => a.y - b.y);
   for (const u of units) u.draw(ctx);
   for (const p of G.projs) p.draw(ctx);
   G.fx.draw(ctx);
@@ -215,9 +247,11 @@ function drawFatal(ctx) {
 function updateFatal() {
   if (G.wasPressed('enter')) {
     G.fatal = null;
+    if (G.isGuest()) { G.net.leave(); return; }
     try { G.startGame(G.hasSave()); } catch (e) { G.fatal = String(e && e.message || e); }
   } else if (G.wasPressed('delete')) {
     G.fatal = null;
+    if (G.net) G.net.leave();
     G.clearSave();
     G.state = 'title';
   }
@@ -239,68 +273,90 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
+const OVERLAYS = ['dialog', 'book', 'paused'];
+
 function step(now) {
   const dt = G.U.clamp((now - last) / 1000, 0, 0.05);
   last = now;
   G.time += dt;
   G.shake = Math.max(0, G.shake - dt);
   if (G.bannerMsg) G.bannerMsg.time -= dt;
-
   const ctx = G.ctx;
+
+  if (G.state === 'title') {
+    if (G.wasPressed('enter') || G.mouse.clicked) G.startGame(G.hasSave());
+    else if (G.wasPressed('n')) G.startGame(false);
+    else if (G.wasPressed('h')) G.netHost();
+    else if (G.wasPressed('u')) { G.joinCode = ''; G.state = 'join'; }
+    G.ui.drawTitle(ctx);
+    G.ui.drawCursor(ctx);
+    return;
+  }
+  if (G.state === 'join' || G.state === 'connecting') {
+    G.updateJoinScreen();
+    G.ui.drawJoin(ctx);
+    G.ui.drawCursor(ctx);
+    return;
+  }
+
+  // Invitado: su propio bucle (recibe el mundo del anfitrión)
+  if (G.isGuest()) {
+    G.net.guestStep(dt);
+    G.ui.drawCursor(ctx);
+    return;
+  }
+
+  // Un jugador o anfitrión
+  const st0 = G.state;
+  if (G.state === 'play') {
+    updateCamera();
+    handleLocalKeys();
+    if (G.state === 'play') {
+      gatherLocalInput(true);
+      simulate(dt);
+    }
+  } else if (OVERLAYS.includes(G.state) && G.isHost()) {
+    // en multijugador el mundo no se pausa
+    updateCamera();
+    gatherLocalInput(false);
+    simulate(dt);
+  }
+  G.fx.update(dt);
+  updateCamera();
+  drawScene(ctx);
+  if (G.state !== 'dead' && G.state !== 'victory') G.ui.drawHUD(ctx);
+  const fresh = G.state !== st0; // se abrió este frame: no reutilizar la misma tecla
+
   switch (G.state) {
-    case 'title':
-      if (G.wasPressed('enter') || G.mouse.clicked) G.startGame(G.hasSave());
-      else if (G.wasPressed('n')) G.startGame(false);
-      G.ui.drawTitle(ctx);
-      break;
-    case 'play':
-      updateCamera();
-      updatePlay(dt);
-      G.fx.update(dt);
-      updateCamera();
-      drawScene(ctx);
-      G.ui.drawHUD(ctx);
-      if (G.state === 'dialog') G.ui.drawDialog(ctx);
-      break;
     case 'dialog':
-      G.updateDialog(dt);
-      G.fx.update(dt);
-      drawScene(ctx);
-      G.ui.drawHUD(ctx);
+      if (!fresh) G.updateDialog(dt);
       G.ui.drawDialog(ctx);
       break;
     case 'book':
-      if (G.wasPressed('b') || G.wasPressed('tab') || G.wasPressed('escape')) G.state = 'play';
+      if (fresh) { /* nada */ } else if (G.wasPressed('b') || G.wasPressed('tab') || G.wasPressed('escape')) G.state = 'play';
       else G.book.update();
-      updateCamera();
-      drawScene(ctx);
-      G.ui.drawHUD(ctx);
       G.book.draw(ctx);
       break;
     case 'paused':
-      if (G.wasPressed('escape')) G.state = 'play';
-      else if (G.wasPressed('t')) { G.save(); G.state = 'title'; }
+      if (fresh) { /* nada */ } else if (G.wasPressed('escape')) G.state = 'play';
+      else if (G.wasPressed('t')) { G.save(); if (G.net) G.net.leave(); G.state = 'title'; }
       else if (G.wasPressed('l') && !G.world.lobby) G.fleeToLobby();
-      drawScene(ctx);
-      G.ui.drawHUD(ctx);
       G.ui.drawPaused(ctx);
       break;
     case 'dead':
-      G.fx.update(dt);
       if (G.wasPressed('enter')) G.retryZone();
       else if (G.wasPressed('l')) {
         G.essence = Math.floor(G.essence / 2);
         G.fleeToLobby();
       }
-      drawScene(ctx);
       G.ui.drawDead(ctx);
       break;
     case 'victory':
-      if (G.wasPressed('enter')) G.fleeToLobby(G.currentAllyTypes());
-      drawScene(ctx);
+      if (G.wasPressed('enter')) G.fleeToLobby(G.currentAllies());
       G.ui.drawVictory(ctx);
       break;
   }
+  if (G.isHost()) G.net.hostTick(dt);
   G.ui.drawCursor(ctx);
 }
 

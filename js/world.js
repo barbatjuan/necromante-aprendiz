@@ -16,32 +16,63 @@ function borderWalls(w, h, door) {
   return walls;
 }
 
-function resetEntities(allyTypes, px, py) {
+// Siervos guardados como [tipo, idDelDueño]; acepta también solo el tipo (partidas antiguas)
+const normAllies = list => list.map(a => (Array.isArray(a) ? a : [a, G.player ? G.player.id : 0]));
+
+function resetEntities(allyList, px, py) {
   G.allies = [];
   G.corpses = [];
   G.orbs = [];
   G.projs = [];
   G.hazards = [];
-  G.focus = null;
-  G.frenzy = 0;
   G.fx.clear();
   G.victoryTimer = 0;
-  G.player = new Player(px, py);
-  G.player.name = 'Necromante';
-  G.players = [G.player];
-  allyTypes.forEach((type, k) => {
-    const a = new Unit(type, px - 20 - (k % 3) * 22, py - 30 + Math.floor(k / 3) * 30 + (k % 2) * 16, 'ally');
+  G.zoneSeq = (G.zoneSeq || 0) + 1; // los invitados reconstruyen el mapa al cambiar
+  if (!G.player) {
+    G.player = new Player(px, py);
+    G.players = [G.player];
+  }
+  // reubicar a todos los jugadores en la entrada
+  G.players.forEach((p, k) => {
+    p.x = px - (k % 2) * 30;
+    p.y = py + (k - (G.players.length - 1) / 2) * 34;
+    p.maxHp = G.playerMaxHp();
+    p.hp = p.maxHp;
+    p.dead = false;
+    p.respawn = 0;
+    p.focus = null;
+    p.frenzy = 0;
+    p.atkCd = p.qCd = p.fCd = p.vCd = 0;
+    p.tp++;
+  });
+  normAllies(allyList).forEach(([type, oid], k) => {
+    if (!G.ENEMIES[type]) return;
+    const owner = G.players.find(p => p.id === oid) || G.player;
+    const a = new Unit(type, owner.x - 20 - (k % 3) * 22, owner.y - 30 + Math.floor(k / 3) * 30 + (k % 2) * 16, 'ally');
+    a.owner = owner;
     G.allies.push(a);
   });
-  G.zoneAllies = allyTypes.slice();
+  G.zoneAllies = G.currentAllies();
 }
 
-G.currentAllyTypes = () => G.allies.filter(a => !a.dead).map(a => a.type);
+G.currentAllies = () => G.allies.filter(a => !a.dead && a.owner).map(a => [a.type, a.owner.id]);
+// compatibilidad: algunos sitios piden la lista actual con este nombre
+G.currentAllyTypes = G.currentAllies;
 
-G.loadZone = (i, allyTypes = []) => {
+// Construye el mapa (paredes, puerta, portales) sin crear enemigos: lo usan anfitrión e invitados
+G.buildWorld = i => {
+  if (i < 0) {
+    const L = G.LOBBY;
+    G.world = {
+      w: L.w, h: L.h, zone: L, lobby: true,
+      walls: [...borderWalls(L.w, L.h, false), ...L.walls],
+      door: null, open: false,
+      portals: G.ZONES.map((z, k) => ({ i: k, x: L.portalX(k), y: L.portalY, r: 30, z })),
+    };
+    G.mentor = { x: L.mentor.x, y: L.mentor.y, face: Math.PI / 2 };
+    return;
+  }
   const z = G.ZONES[i];
-  G.zone = i;
-  G.maxZone = Math.max(G.maxZone, i);
   const { w, h } = z;
   const hasDoor = i < G.ZONES.length - 1;
   G.world = {
@@ -51,12 +82,24 @@ G.loadZone = (i, allyTypes = []) => {
     open: false,
     home: { x: 110, y: h / 2 - 120, r: 28 }, // portal de regreso (activo al limpiar)
   };
-  G.enemies = z.spawns.map(([type, x, y]) =>
-    type === 'paladin' ? new Boss(x, y)
+};
+
+G.loadZone = (i, allyList = []) => {
+  const z = G.ZONES[i];
+  G.zone = i;
+  G.maxZone = Math.max(G.maxZone, i);
+  G.buildWorld(i);
+  // más jugadores = enemigos más resistentes
+  const hpMult = 1 + 0.6 * (G.players.length - 1);
+  G.enemies = z.spawns.map(([type, x, y]) => {
+    const e = type === 'paladin' ? new Boss(x, y)
       : type === 'reysol' ? new KingBoss(x, y)
         : type === 'arcangel' ? new ArchangelBoss(x, y)
-          : new Unit(type, x, y, 'enemy'));
-  resetEntities(allyTypes, 70, h / 2);
+          : new Unit(type, x, y, 'enemy');
+    e.maxHp = e.hp = Math.round(e.maxHp * hpMult);
+    return e;
+  });
+  resetEntities(allyList, 70, z.h / 2);
   G.save();
   G.banner(z.name, 2.5);
   if (i === 1 && !G.seen.q) {
@@ -73,39 +116,34 @@ G.loadZone = (i, allyTypes = []) => {
   }
 };
 
-G.loadLobby = (allyTypes = G.currentAllyTypes()) => {
+G.loadLobby = (allyList = G.currentAllies()) => {
   const L = G.LOBBY;
   G.zone = -1;
-  G.world = {
-    w: L.w, h: L.h, zone: L, lobby: true,
-    walls: [...borderWalls(L.w, L.h, false), ...L.walls],
-    door: null, open: false,
-    portals: G.ZONES.map((z, i) => ({ i, x: L.portalX(i), y: L.portalY, r: 30, z })),
-  };
+  G.buildWorld(-1);
   G.enemies = [new Dummy(L.dummy.x, L.dummy.y)];
-  resetEntities(allyTypes, L.start.x, L.start.y);
-  G.mentor = { x: L.mentor.x, y: L.mentor.y, face: Math.PI / 2 };
+  resetEntities(allyList, L.start.x, L.start.y);
   G.save();
   G.banner(L.name, 2);
 };
 
-G.nextZone = () => G.loadZone(G.zone + 1, G.currentAllyTypes());
+G.nextZone = () => G.loadZone(G.zone + 1, G.currentAllies());
 
 G.portalUnlocked = i => i <= G.maxZone;
 
-G.lobbyInteract = () => {
-  const p = G.player;
+// Solo el jugador local abre diálogos o el libro (son interfaz de su pantalla)
+G.lobbyInteract = (p = G.player) => {
+  if (p !== G.player) return;
   if (G.U.dist(p, G.mentor) < 70) return G.talkMentor();
-  if (G.nearAltar()) {
+  if (G.nearAltar(p)) {
     G.state = 'book';
     G.seen.book = true;
   }
 };
 
-G.nearAltar = () => {
-  if (!G.world.lobby) return false;
+G.nearAltar = (p = G.player) => {
+  if (!G.world.lobby || !p) return false;
   const altar = G.LOBBY.walls.find(w => w.k === 'altar');
-  return G.U.dist(G.player, { x: altar.x + altar.w / 2, y: altar.y + altar.h / 2 }) < 110;
+  return G.U.dist(p, { x: altar.x + altar.w / 2, y: altar.y + altar.h / 2 }) < 110;
 };
 
 // Walls + puerta cerrada + límites
@@ -117,11 +155,12 @@ G.collideWalls = u => {
 };
 
 G.updateDoor = () => {
-  const wd = G.world, p = G.player;
+  const wd = G.world;
+  const ps = G.alivePlayers();
   if (wd.lobby) {
     for (const pt of wd.portals) {
-      if (G.portalUnlocked(pt.i) && G.U.dist(p, pt) < pt.r) {
-        G.loadZone(pt.i, G.currentAllyTypes());
+      if (G.portalUnlocked(pt.i) && ps.some(p => G.U.dist(p, pt) < pt.r)) {
+        G.loadZone(pt.i, G.currentAllies());
         return;
       }
     }
@@ -140,11 +179,11 @@ G.updateDoor = () => {
     if (wd.door) G.maxZone = Math.max(G.maxZone, G.zone + 1);
     G.save();
   }
-  if (wd.open && G.U.dist(p, wd.home) < wd.home.r) {
+  if (wd.open && ps.some(p => G.U.dist(p, wd.home) < wd.home.r)) {
     G.loadLobby();
     return;
   }
-  if (wd.door && wd.open && p.x > wd.w - WALL - p.r - 4 && Math.abs(p.y - wd.h / 2) < DOOR_HALF) {
+  if (wd.door && wd.open && ps.some(p => p.x > wd.w - WALL - p.r - 4 && Math.abs(p.y - wd.h / 2) < DOOR_HALF)) {
     G.nextZone();
   }
 };

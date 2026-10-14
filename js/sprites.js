@@ -510,4 +510,12 @@ G.S = {
 };
 
 G.PLAYER_LOOK = { skin: '#b8a8c8', shirt: '#3a2060', robe: true, trim: '#9d6bff', hat: 'necro', hood: '#2a1848', cape: '#1a0e2c', weapon: 'scythe' };
+// Túnicas por jugador (multijugador)
+G.PLAYER_LOOKS = [
+  { ...G.PLAYER_LOOK, aura: '#9d6bff' },
+  { ...G.PLAYER_LOOK, shirt: '#601a28', trim: '#ff6b7a', hood: '#40101a', cape: '#2a0810', aura: '#ff6b7a' },
+  { ...G.PLAYER_LOOK, shirt: '#124048', trim: '#5fe0d0', hood: '#0c2c32', cape: '#06181c', aura: '#5fe0d0' },
+  { ...G.PLAYER_LOOK, shirt: '#4a3a10', trim: '#ffd84a', hood: '#30250a', cape: '#1c1606', aura: '#ffd84a' },
+];
+
 G.MENTOR_LOOK = { skin: '#dcd8c4', shirt: '#3a3450', robe: true, trim: '#3fcf8e', hat: 'skull', hood: '#2a2438', cape: '#1e1a2c', weapon: 'skullstaff' };

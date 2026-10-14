@@ -314,35 +314,55 @@ class Player {
     this.hp = this.maxHp;
     this.speed = 190;
     this.atkCd = 0; this.swing = 0; this.qCd = 0; this.fCd = 0; this.vCd = 0;
+    this.id = G.nid();
+    this.name = 'Necromante';
+    this.color = 0;
+    this.frenzy = 0;
+    this.focus = null;
+    this.respawn = 0;
+    this.tp = 0; // contador de teletransportes (sincroniza posición con invitados)
+    this.remote = false;
+    this.inp = { keys: {}, mw: { x: x + 10, y }, down: false, ev: [] };
     this.facing = 0; this.flash = 0; this.lastHurt = 99;
     this.dead = false;
   }
-  update(dt) {
+  // Movimiento con teclado (lo usa el jugador local; los remotos envían su posición)
+  move(dt, keys) {
     let mx = 0, my = 0;
-    if (G.keys['w'] || G.keys['arrowup']) my -= 1;
-    if (G.keys['s'] || G.keys['arrowdown']) my += 1;
-    if (G.keys['a'] || G.keys['arrowleft']) mx -= 1;
-    if (G.keys['d'] || G.keys['arrowright']) mx += 1;
+    if (keys['w'] || keys['arrowup']) my -= 1;
+    if (keys['s'] || keys['arrowdown']) my += 1;
+    if (keys['a'] || keys['arrowleft']) mx -= 1;
+    if (keys['d'] || keys['arrowright']) mx += 1;
     if (mx || my) {
       const l = Math.hypot(mx, my);
       this.x += (mx / l) * this.speed * dt;
       this.y += (my / l) * this.speed * dt;
     }
-    this.facing = G.U.angle(this, G.mw);
+  }
+
+  update(dt) {
+    const I = this.inp;
+    if (!this.remote) this.move(dt, I.keys);
+    this.facing = G.U.angle(this, I.mw);
     this.atkCd -= dt; this.swing -= dt; this.qCd -= dt; this.fCd -= dt; this.vCd -= dt;
+    this.frenzy = Math.max(0, this.frenzy - dt);
     this.flash = Math.max(0, this.flash - dt);
     this.lastHurt += dt;
     const regen = G.world.lobby ? 40 : 4;
     if (this.lastHurt > 4 || G.world.lobby) this.hp = Math.min(this.maxHp, this.hp + regen * dt);
 
-    if ((G.mouse.down || G.keys['j']) && this.atkCd <= 0) this.attack();
-    if (G.wasPressed('e')) {
-      if (G.world.lobby) G.lobbyInteract();
-      else G.book.raise();
+    if ((I.down || I.keys['j']) && this.atkCd <= 0) this.attack();
+    for (const ev of I.ev) {
+      if (ev === 'e') {
+        if (G.world.lobby) G.lobbyInteract(this);
+        else G.book.raise(this);
+      } else if (ev === 'q') G.book.explode(this);
+      else if (ev === 'f') G.book.harvest(this);
+      else if (ev === 'v') G.book.frenzy(this);
+      else if (ev === 'r') G.commandAllies(this);
+      else if (ev.startsWith('buy:')) G.book.buy(+ev.slice(4), this);
     }
-    if (G.wasPressed('q')) G.book.explode();
-    if (G.wasPressed('f')) G.book.harvest();
-    if (G.wasPressed('v')) G.book.frenzy();
+    I.ev = [];
   }
   attack() {
     this.atkCd = 0.42;
@@ -373,10 +393,11 @@ class Player {
       ctx.closePath();
       ctx.fill();
     }
+    const look = G.PLAYER_LOOKS[this.color % G.PLAYER_LOOKS.length];
     // aura
     const g = ctx.createRadialGradient(x, y + 12, 2, x, y + 12, 22);
-    g.addColorStop(0, 'rgba(157,107,255,0.45)');
-    g.addColorStop(1, 'rgba(157,107,255,0)');
+    g.addColorStop(0, look.aura + '73');
+    g.addColorStop(1, look.aura + '00');
     ctx.fillStyle = g;
     ctx.beginPath();
     ctx.ellipse(x, y + 12, 22, 8, 0, 0, Math.PI * 2);
@@ -384,8 +405,12 @@ class Player {
     G.S.shadow(ctx, x, y, this.r);
     G.S.humanoid(ctx, {
       x, y, s: 1.1, face: facing, walk: this.walk, moving: this.moving,
-      flash: this.flash > 0, atk: this.swing, look: G.PLAYER_LOOK,
+      flash: this.flash > 0, atk: this.swing, look,
     });
+    if (G.players.length > 1) {
+      G.U.text(ctx, this.name, x, y - 36, 11, look.aura, 'center', true);
+      if (this !== G.player) G.U.bar(ctx, x - 14, y + 18, 28, 3, this.hp / this.maxHp, '#b03a5a');
+    }
     // libro flotante
     const ba = G.time * 1.5;
     const bx = x + Math.cos(ba) * 22, by = y - 8 + Math.sin(ba) * 8 + Math.sin(G.time * 3) * 2;
@@ -408,8 +433,10 @@ class Unit {
   constructor(type, x, y, team) {
     const t = G.ENEMIES[type];
     this.type = type; this.t = t;
+    this.id = G.nid();
     this.x = x; this.y = y; this.r = t.r;
     this.team = team;
+    this.owner = null;
     const mult = team === 'ally' ? G.allyMult() : 1;
     this.maxHp = Math.round(t.hp * mult);
     this.hp = this.maxHp;
@@ -436,7 +463,7 @@ class Unit {
   }
 
   moveToward(tx, ty, spd, dt) {
-    if (this.team === 'ally' && G.frenzy > 0) spd *= 1.3;
+    if (this.frenzied()) spd *= 1.3;
     const a = Math.atan2(ty - this.y, tx - this.x);
     this.x += Math.cos(a) * spd * dt;
     this.y += Math.sin(a) * spd * dt;
@@ -447,10 +474,14 @@ class Unit {
     return this.team === 'enemy' ? G.friendlies() : G.enemiesAlive();
   }
 
+  frenzied() {
+    return this.team === 'ally' && !!this.owner && this.owner.frenzy > 0;
+  }
+
   update(dt) {
     this.flash = Math.max(0, this.flash - dt);
     this.atk = Math.max(0, this.atk - dt);
-    this.cd -= dt * (this.team === 'ally' && G.frenzy > 0 ? 1.5 : 1);
+    this.cd -= dt * (this.frenzied() ? 1.5 : 1);
     this.dashCd -= dt;
     this.blinkCd -= dt;
     this.x += this.kx * dt; this.y += this.ky * dt;
@@ -485,7 +516,9 @@ class Unit {
   }
 
   thinkAlly(dt) {
-    const p = G.player;
+    // sigue a su dueño; si cayó, al jugador vivo más cercano
+    const p = this.owner && !this.owner.dead ? this.owner : G.nearestPlayer(this);
+    if (!p) return;
     const dp = G.U.dist(this, p);
     if (dp > 900) { // atascado: teletransportar
       this.x = p.x + G.U.rand(-30, 30); this.y = p.y + G.U.rand(-30, 30);
@@ -494,8 +527,8 @@ class Unit {
     this.retarget -= dt;
     if (dp > 520) {
       this.target = null;
-    } else if (G.focus && !G.focus.dead) {
-      this.target = G.focus;
+    } else if (p.focus && !p.focus.dead) {
+      this.target = p.focus;
     } else if (this.retarget <= 0 || !this.target || this.target.dead) {
       this.retarget = 0.4;
       const cands = G.enemiesAlive().filter(e => G.U.dist(e, p) < 420);
@@ -506,7 +539,7 @@ class Unit {
       return;
     }
     // seguir detrás del jugador
-    const alive = G.allies.filter(a => !a.dead);
+    const alive = G.allies.filter(a => !a.dead && (a.owner || p) === (this.owner || p));
     const n = alive.length, i = alive.indexOf(this);
     const a = p.facing + Math.PI + (i - (n - 1) / 2) * 0.5;
     const rad = 55 + (i % 3) * 20;
@@ -622,7 +655,7 @@ class Unit {
       ctx.stroke();
     }
     G.S.shadow(ctx, this.x, this.y, this.r, t.look.float ? 0.2 : 0.35);
-    if (ally && G.frenzy > 0) {
+    if (this.frenzied()) {
       ctx.fillStyle = `rgba(255,60,60,${0.25 + Math.sin(G.time * 10 + this.seed) * 0.1})`;
       ctx.beginPath();
       ctx.ellipse(this.x, this.y + this.r * 0.9, this.r * 1.2, this.r * 0.45, 0, 0, Math.PI * 2);
@@ -643,7 +676,7 @@ class Unit {
     if (this.hp < this.maxHp) {
       G.U.bar(ctx, this.x - this.r, this.y + this.r + 6, this.r * 2, 4, this.hp / this.maxHp, ally ? '#5fffae' : '#e04545');
     }
-    if (G.focus === this) {
+    if (G.player && G.player.focus === this) {
       ctx.strokeStyle = '#5fffae';
       ctx.lineWidth = 2;
       const s = this.r + 10 + Math.sin(G.time * 8) * 2;
@@ -691,16 +724,21 @@ class Boss extends Unit {
   }
 
   wake() {
-    if (G.U.dist(this, G.player) < this.t.sight) {
+    if (G.alivePlayers().some(p => G.U.dist(this, p) < this.t.sight)) {
       this.aggro = true;
       G.banner(`¡${this.t.name} despierta!`, 2.5);
     }
   }
 
+  aimTarget() {
+    return G.nearestPlayer(this) || this.target || { x: this.x + 1, y: this.y };
+  }
+
   pickTarget(dt) {
     this.retarget -= dt;
     if (this.retarget <= 0 || !this.target || this.target.dead) {
-      const p = G.player;
+      const p = G.nearestPlayer(this);
+      if (!p) { this.target = null; return; }
       const near = G.nearest(this, G.friendlies());
       this.target = (near && G.U.dist(this, near) < G.U.dist(this, p) * 0.6) ? near : p;
       this.retarget = 1;
@@ -776,7 +814,7 @@ class Boss extends Unit {
       if (this.chargeCd <= 0 && d > 110) {
         this.state = 'chargeWind';
         this.timer = 0.75;
-        this.chargeAng = G.U.angle(this, G.player);
+        this.chargeAng = G.U.angle(this, this.aimTarget());
       }
       if (this.phase === 2) {
         this.novaCd -= dt;
@@ -896,7 +934,7 @@ class KingBoss extends Boss {
 
     if (this.state === 'beam') {
       this.timer -= dt;
-      this.facing = G.U.angle(this, G.player);
+      this.facing = G.U.angle(this, this.aimTarget());
       if (this.timer <= 0) {
         // abanico de rayos solares
         const n = this.phase >= 2 ? 9 : 7;
@@ -929,7 +967,7 @@ class KingBoss extends Boss {
     } else if (this.chargeCd <= 0 && d > 140) {
       this.state = 'chargeWind';
       this.timer = 0.7;
-      this.chargeAng = G.U.angle(this, G.player);
+      this.chargeAng = G.U.angle(this, this.aimTarget());
     }
     if (this.phase >= 2) {
       this.summonCd -= dt;
@@ -939,7 +977,7 @@ class KingBoss extends Boss {
       this.rainCd -= dt;
       if (this.rainCd <= 0) {
         this.rainCd = 3.2;
-        const p = G.player;
+        const p = G.randomPlayer();
         for (let i = 0; i < 6; i++) {
           const a = Math.random() * Math.PI * 2, rr = i === 0 ? 0 : G.U.rand(40, 200);
           G.addHazard(p.x + Math.cos(a) * rr, p.y + Math.sin(a) * rr, 60, 1.3 + i * 0.1, 22, 50);
@@ -985,7 +1023,7 @@ class ArchangelBoss extends Boss {
   // lanzas de luz: filas de círculos que estallan desde el arcángel hacia el objetivo
   lances() {
     const n = this.phase >= 2 ? 5 : 3;
-    const base = G.U.angle(this, G.player);
+    const base = G.U.angle(this, this.aimTarget());
     for (let j = 0; j < n; j++) {
       const a = base + (j - (n - 1) / 2) * 0.35;
       for (let k = 1; k <= 8; k++) {
@@ -1047,7 +1085,7 @@ class ArchangelBoss extends Boss {
     else if (this.chargeCd <= 0 && d > 140) {
       this.state = 'chargeWind';
       this.timer = 0.65;
-      this.chargeAng = G.U.angle(this, G.player);
+      this.chargeAng = G.U.angle(this, this.aimTarget());
     }
     if (this.phase >= 2) {
       this.ringCd -= dt;
@@ -1059,7 +1097,7 @@ class ArchangelBoss extends Boss {
       this.judgeCd -= dt;
       if (this.judgeCd <= 0) {
         this.judgeCd = 2.6;
-        const p = G.player;
+        const p = G.randomPlayer();
         for (let i = 0; i < 5; i++) {
           const a = Math.random() * Math.PI * 2, rr = i === 0 ? 0 : G.U.rand(50, 180);
           G.addHazard(p.x + Math.cos(a) * rr, p.y + Math.sin(a) * rr, 58, 1.2 + i * 0.08, 24, 50);

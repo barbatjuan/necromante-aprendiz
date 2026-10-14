@@ -3,21 +3,33 @@ G.book = {
   btns: [],
 
   // cadáver más cercano al jugador dentro del alcance
-  corpseInReach(range = 90) {
-    return G.nearest(G.player, G.corpses, range);
+  corpseInReach(p = G.player, range = 90) {
+    return G.nearest(p, G.corpses, range);
   },
 
-  raise() {
-    const c = this.corpseInReach();
-    if (!c) return G.banner('No hay cadáveres cerca', 1.2);
-    if (G.allies.filter(a => !a.dead).length >= G.maxAllies()) {
-      return G.banner('Demasiados siervos. Mejora "Legión" en el altar de la guarida', 2);
+  // siervos que pertenecen a un jugador
+  alliesOf(p) {
+    return G.allies.filter(a => !a.dead && a.owner === p);
+  },
+
+  // avisos que solo debe ver quien lanzó el hechizo
+  tell(p, text, time) {
+    if (p === G.player) G.banner(text, time, true);
+    else if (G.net) G.net.tell(p, text, time);
+  },
+
+  raise(p = G.player) {
+    const c = this.corpseInReach(p);
+    if (!c) return this.tell(p, 'No hay cadáveres cerca', 1.2);
+    if (this.alliesOf(p).length >= G.maxAllies()) {
+      return this.tell(p, 'Demasiados siervos. Mejora "Legión" en el altar de la guarida', 2);
     }
     const cost = G.reviveCost(c.t);
-    if (G.essence < cost) return G.banner(`Esencia insuficiente (${cost} necesaria)`, 1.5);
+    if (G.essence < cost) return this.tell(p, `Esencia insuficiente (${cost} necesaria)`, 1.5);
     G.essence -= cost;
     G.corpses.splice(G.corpses.indexOf(c), 1);
     const a = new Unit(c.type, c.x, c.y, 'ally');
+    a.owner = p;
     a.facing = c.rot;
     G.allies.push(a);
     G.stats.raised++;
@@ -26,30 +38,28 @@ G.book = {
     G.fx.text(c.x, c.y - 30, '¡Álzate!', '#7dffb8');
   },
 
-  explode() {
-    if (!G.qUnlocked()) return G.banner('Aún no conoces ese hechizo', 1.2);
-    const p = G.player;
+  explode(p = G.player) {
+    if (!G.qUnlocked()) return this.tell(p, 'Aún no conoces ese hechizo', 1.2);
     if (p.qCd > 0) return;
     // prioriza el cadáver cerca del cursor, si no el más cercano al jugador
-    let c = G.nearest(G.mw, G.corpses.filter(k => G.U.dist(k, p) < 320), 80);
+    let c = G.nearest(p.inp.mw, G.corpses.filter(k => G.U.dist(k, p) < 320), 80);
     if (!c) c = G.nearest(p, G.corpses, 320);
-    if (!c) return G.banner('Necesitas un cadáver cerca para detonar', 1.4);
+    if (!c) return this.tell(p, 'Necesitas un cadáver cerca para detonar', 1.4);
     G.corpses.splice(G.corpses.indexOf(c), 1);
     p.qCd = 3;
     const dmg = (45 + c.t.hp * 0.3) * G.spellMult();
     G.fx.ring(c.x, c.y, 110, '#9dff5f', 0.4);
     G.fx.burst(c.x, c.y, '#7acf3f', 40, 280, 0.6, 4);
     G.fx.burst(c.x, c.y, '#5a2a5a', 20, 180, 0.8, 5);
-    G.shake = Math.min(0.4, G.shake + 0.2);
+    if (p === G.player) G.shake = Math.min(0.4, G.shake + 0.2);
     for (const e of G.enemiesAlive()) {
       if (G.U.dist(c, e) < 100 + e.r) G.damage(e, dmg, p);
     }
   },
 
   // Cosecha de Almas: daña a enemigos cercanos y te cura con lo drenado
-  harvest() {
-    if (!G.fUnlocked()) return G.banner('Aún no conoces ese hechizo', 1.2);
-    const p = G.player;
+  harvest(p = G.player) {
+    if (!G.fUnlocked()) return this.tell(p, 'Aún no conoces ese hechizo', 1.2);
     if (p.fCd > 0) return;
     p.fCd = 8;
     const R = 150;
@@ -70,26 +80,28 @@ G.book = {
       p.hp = Math.min(p.maxHp, p.hp + heal);
       G.fx.text(p.x, p.y - 34, '+' + heal, '#7dffb8');
     }
-    for (const a of G.allies) a.hp = Math.min(a.maxHp, a.hp + Math.round(heal * 0.3));
+    for (const a of this.alliesOf(p)) a.hp = Math.min(a.maxHp, a.hp + Math.round(heal * 0.3));
   },
 
   // Furia Necrótica: siervos +50% daño, +50% velocidad de ataque y +30% movimiento
-  frenzy() {
-    if (!G.vUnlocked()) return G.banner('Aún no conoces ese hechizo', 1.2);
-    const p = G.player;
+  frenzy(p = G.player) {
+    if (!G.vUnlocked()) return this.tell(p, 'Aún no conoces ese hechizo', 1.2);
     if (p.vCd > 0) return;
-    if (!G.allies.some(a => !a.dead)) return G.banner('No tienes siervos que enfurecer', 1.4);
+    const mine = this.alliesOf(p);
+    if (!mine.length) return this.tell(p, 'No tienes siervos que enfurecer', 1.4);
     p.vCd = 20;
-    G.frenzy = 6;
-    G.banner('¡FURIA NECRÓTICA!', 1.2);
-    for (const a of G.allies) {
+    p.frenzy = 6;
+    this.tell(p, '¡FURIA NECRÓTICA!', 1.2);
+    for (const a of mine) {
       G.fx.burst(a.x, a.y, '#ff4a4a', 12, 120, 0.5);
       G.fx.ring(a.x, a.y, 30, '#ff6a6a', 0.4);
     }
   },
 
-  buy(i) {
-    if (!G.nearAltar()) return;
+  buy(i, p = G.player) {
+    // los invitados piden la compra al anfitrión
+    if (G.net && G.net.role === 'guest') return G.net.sendEvent('buy:' + i);
+    if (!G.nearAltar(p)) return;
     const u = G.UPGRADES[i];
     if (!u) return;
     const lvl = G.up[u.id];
@@ -99,8 +111,10 @@ G.book = {
     G.essence -= cost;
     G.up[u.id]++;
     if (u.id === 'carne') {
-      G.player.maxHp = G.playerMaxHp();
-      G.player.hp = G.player.maxHp;
+      for (const pl of G.players) {
+        pl.maxHp = G.playerMaxHp();
+        pl.hp = pl.maxHp;
+      }
     }
     if (u.id === 'vigor') {
       for (const a of G.allies) {
@@ -111,7 +125,7 @@ G.book = {
         a.dmg = a.t.dmg * m;
       }
     }
-    G.fx.burst(G.player.x, G.player.y, '#b57cff', 20, 140, 0.6);
+    G.fx.burst(p.x, p.y, '#b57cff', 20, 140, 0.6);
     G.save();
   },
 
@@ -182,7 +196,7 @@ G.book = {
       y += 44;
     }
     line('[R] Ordenar: marca al enemigo bajo el cursor.', L, y, 13);
-    line(`Siervos: ${G.allies.filter(a => !a.dead).length} / ${G.maxAllies()}`, L, y + 24, 14, '#1f5a3a', true);
+    line(`Siervos: ${G.book.alliesOf(G.player).length} / ${G.maxAllies()}`, L, y + 24, 14, '#1f5a3a', true);
 
     // página derecha: rituales
     U.text(ctx, 'Rituales de Poder', bx + (bw * 3) / 4, by + 26, 22, '#4a1a5a', 'center', true);

@@ -1,6 +1,8 @@
 G.bannerMsg = null;
-G.banner = (text, time = 2) => {
+// local = true: solo en esta pantalla (no se reenvía a los invitados)
+G.banner = (text, time = 2, local = false) => {
   G.bannerMsg = { text, time, max: time };
+  if (!local && G.isHost && G.isHost()) G.net.events.push(['n', text, time]);
 };
 
 // ---------- Diálogos ----------
@@ -135,7 +137,7 @@ G.ui = {
       return G.world.door ? 'Puerta del este abierta → siguiente zona. Portal verde → guarida.' : 'Portal verde → volver a la guarida.';
     }
     const c = G.book.corpseInReach();
-    if (c && G.allies.filter(a => !a.dead).length < G.maxAllies()) {
+    if (c && G.book.alliesOf(G.player).length < G.maxAllies()) {
       return `[E] Alzar ${c.t.name} (${G.reviveCost(c.t)} esencia)`;
     }
     if (p.hp < p.maxHp * 0.3) return G.fUnlocked() ? 'Vida baja: usa Cosecha [F] o aléjate para regenerarte.' : 'Vida baja: aléjate del combate para regenerarte.';
@@ -165,7 +167,7 @@ G.ui = {
     U.poly(ctx, 30, 56, 7, 4, 0);
     ctx.fill();
     U.text(ctx, `${G.essence}`, 44, 56, 18, '#d8b8ff', 'left', true);
-    const n = G.allies.filter(a => !a.dead).length;
+    const n = G.book.alliesOf(G.player).length;
     G.S.humanoid(ctx, { x: 132, y: 56, s: 0.6, face: 0, look: G.undeadLook('aldeano', G.ENEMIES.aldeano.look), noAura: true });
     U.text(ctx, `${n} / ${G.maxAllies()}`, 144, 56, 16, '#7dffb8', 'left', true);
     if (!G.world.lobby) U.text(ctx, `Zona ${G.zone + 1}/${G.ZONES.length}`, 250, 76, 11, '#998', 'right');
@@ -222,6 +224,25 @@ G.ui = {
         U.poly(ctx, G.W / 2 + Math.cos(a) * 280, G.H / 2 + Math.sin(a) * 220, 14, 3, a);
         ctx.fill();
       }
+    }
+
+    // multijugador: sala y compañeros
+    if (G.net) {
+      ctx.fillStyle = 'rgba(10,6,16,0.7)';
+      ctx.fillRect(12, 92, 250, 24 + G.players.length * 18);
+      U.text(ctx, `Sala ${G.net.code} · ${G.players.length}/4`, 22, 104, 13, '#ffd84a', 'left', true);
+      G.players.forEach((pl, i) => {
+        const yy = 124 + i * 18;
+        const col = G.PLAYER_LOOKS[pl.color % 4].aura;
+        U.text(ctx, pl.name + (pl === G.player ? ' (tú)' : ''), 22, yy, 12, col, 'left', true);
+        if (pl.dead) U.text(ctx, `cae... ${Math.ceil(pl.respawn)}s`, 252, yy, 11, '#e04560', 'right');
+        else U.bar(ctx, 160, yy - 4, 92, 7, pl.hp / pl.maxHp, '#b03a5a');
+      });
+    }
+    if (p.dead && G.state === 'play') {
+      ctx.fillStyle = 'rgba(40,0,10,0.35)';
+      ctx.fillRect(0, 0, G.W, G.H);
+      U.text(ctx, `Has caído. Reapareces junto a un compañero en ${Math.max(0, Math.ceil(p.respawn))} s`, G.W / 2, G.H / 2, 20, '#ff9a9a', 'center', true);
     }
 
     const b = G.bannerMsg;
@@ -304,13 +325,38 @@ G.ui = {
     U.text(ctx, 'Derrota a los vivos. Roba su esencia. Alza a sus muertos. Domina el mundo.', G.W / 2, 190, 15, '#c9b8e8', 'center');
 
     const has = G.hasSave();
-    U.text(ctx, has ? '[Enter] Continuar      [N] Nueva partida' : '[Enter] Comenzar', G.W / 2, 390, 20, '#fff', 'center', true);
+    U.text(ctx, has ? '[Enter] Continuar      [N] Nueva partida' : '[Enter] Comenzar', G.W / 2, 380, 20, '#fff', 'center', true);
+    U.text(ctx, 'MULTIJUGADOR:   [H] Crear sala      [U] Unirse a sala', G.W / 2, 416, 17, '#ffd84a', 'center', true);
+    if (G.titleMsg) U.text(ctx, G.titleMsg, G.W / 2, 446, 14, '#ff9a9a', 'center', true);
     const lines = [
       'WASD moverse · Ratón apuntar · Clic/J golpe de hoz',
       'E alzar muerto / usar · Q explosión de cadáver · F cosecha de almas',
       'V furia necrótica · R ordenar siervos · B libro · Esc pausa',
     ];
-    lines.forEach((s, i) => U.text(ctx, s, G.W / 2, 450 + i * 26, 14, '#a898c8', 'center'));
+    lines.forEach((s, i) => U.text(ctx, s, G.W / 2, 486 + i * 24, 14, '#a898c8', 'center'));
+  },
+
+  drawJoin(ctx) {
+    const U = G.U;
+    ctx.fillStyle = '#0d0a12';
+    ctx.fillRect(0, 0, G.W, G.H);
+    U.text(ctx, G.state === 'join' ? 'UNIRSE A UNA SALA' : 'MULTIJUGADOR', G.W / 2, 140, 36, '#ffd84a', 'center', true);
+    if (G.state === 'join') {
+      U.text(ctx, 'Escribe el código de 5 letras que te dio el anfitrión', G.W / 2, 200, 16, '#c9b8e8', 'center');
+      for (let i = 0; i < 5; i++) {
+        const x = G.W / 2 - 150 + i * 62;
+        ctx.strokeStyle = i === G.joinCode.length ? '#ffd84a' : '#7a4fc9';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x, 250, 52, 64);
+        U.text(ctx, G.joinCode[i] || '', x + 26, 284, 34, '#fff', 'center', true);
+      }
+      U.text(ctx, '[Enter] Conectar      [Esc] Volver', G.W / 2, 370, 16, '#fff', 'center', true);
+    } else {
+      U.text(ctx, '. '.repeat(1 + Math.floor(G.time * 3) % 3), G.W / 2, 290, 30, '#d8b8ff', 'center', true);
+      U.text(ctx, '[Esc] Cancelar', G.W / 2, 370, 16, '#fff', 'center', true);
+    }
+    if (G.joinMsg) U.text(ctx, G.joinMsg, G.W / 2, 420, 15, G.state === 'join' ? '#ff9a9a' : '#c9b8e8', 'center', true);
+    U.text(ctx, 'Partida cooperativa de hasta 4 necromantes. La guarida y el progreso son del anfitrión.', G.W / 2, 560, 13, '#998', 'center');
   },
 
   drawPaused(ctx) {
@@ -320,14 +366,22 @@ G.ui = {
     if (!G.world.lobby) G.U.text(ctx, '[L] Huir a la guarida (la zona se reinicia)', G.W / 2, G.H / 2 + 40, 16, '#7dffb8', 'center');
   },
 
-  drawDead(ctx) {
+  drawDead(ctx, guest = false) {
     this.overlay(ctx, 0.7);
-    G.U.text(ctx, 'HAS CAÍDO', G.W / 2, G.H / 2 - 50, 44, '#e04560', 'center', true);
-    G.U.text(ctx, 'Tu esencia se dispersa... (pierdes la mitad)', G.W / 2, G.H / 2, 16, '#c9b8e8', 'center');
-    G.U.text(ctx, '[Enter] Reintentar la zona      [L] Volver a la guarida', G.W / 2, G.H / 2 + 40, 18, '#fff', 'center', true);
+    const many = G.players.length > 1;
+    G.U.text(ctx, many ? 'HABÉIS CAÍDO' : 'HAS CAÍDO', G.W / 2, G.H / 2 - 50, 44, '#e04560', 'center', true);
+    G.U.text(ctx, 'La esencia se dispersa... (se pierde la mitad)', G.W / 2, G.H / 2, 16, '#c9b8e8', 'center');
+    G.U.text(ctx, guest ? 'Esperando a que el anfitrión decida...' : '[Enter] Reintentar la zona      [L] Volver a la guarida',
+      G.W / 2, G.H / 2 + 40, 18, '#fff', 'center', true);
   },
 
-  drawVictory(ctx) {
+  drawVictory(ctx, guest = false) {
+    if (guest) {
+      this.overlay(ctx, 0.8);
+      G.U.text(ctx, 'CIELO Y TIERRA SE ARRODILLAN ANTE VOSOTROS', G.W / 2, G.H / 2 - 40, 30, '#7dffb8', 'center', true);
+      G.U.text(ctx, 'Esperando al anfitrión...', G.W / 2, G.H / 2 + 20, 18, '#fff', 'center', true);
+      return;
+    }
     this.overlay(ctx, 0.8);
     G.U.text(ctx, 'CIELO Y TIERRA SE ARRODILLAN ANTE TI', G.W / 2, G.H / 2 - 70, 34, '#7dffb8', 'center', true);
     G.U.text(ctx, 'El aprendiz se ha convertido en Maestro Necromante.', G.W / 2, G.H / 2 - 24, 18, '#d8b8ff', 'center');
